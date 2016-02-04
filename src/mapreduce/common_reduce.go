@@ -1,5 +1,11 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
 // doReduce does the job of a reduce worker: it reads the intermediate
 // key/value pairs (produced by the map phase) for this task, sorts the
 // intermediate key/value pairs by key, calls the user-defined reduce function
@@ -31,4 +37,31 @@ func doReduce(
 	// 	enc.Encode(KeyValue{key, reduceF(...)})
 	// }
 	// file.Close()
+
+	outputName := mergeName(jobName, reduceTaskNumber)
+	outputFile, err := os.Open(outputName)
+	if os.IsNotExist(err) {
+		outputFile, _ = os.Create(outputName)
+	}
+	output_enc := json.NewEncoder(outputFile)
+	defer outputFile.Close()
+	output_map := make(map[string][]string)
+
+	for i := 0; i < nMap; i++ {
+		inputName := reduceName(jobName, i, reduceTaskNumber)
+		inputFile, _ := os.Open(inputName)
+		input_dec := json.NewDecoder(inputFile)
+		var kvs []KeyValue
+		input_dec.Decode(&kvs)
+		for _, kv := range kvs {
+			output_map[kv.Key] = append(output_map[kv.Key], kv.Value)
+		}
+		inputFile.Close()
+	}
+	for key, values := range output_map {
+		err = output_enc.Encode(KeyValue{key, reduceF(key, values)})
+		if err != nil {
+			fmt.Println("reducing encoding err:", err)
+		}
+	}
 }

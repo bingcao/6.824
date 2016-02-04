@@ -1,0 +1,2 @@
+rm 824*
+find . -maxdepth 1 -name "mrtmp.*" -delete
