@@ -46,10 +46,10 @@ func doReduce(
 		input_dec := json.NewDecoder(inputFile)
 		var kvs []KeyValue
 		input_dec.Decode(&kvs)
+		inputFile.Close()
 		for _, kv := range kvs {
 			output_map[kv.Key] = append(output_map[kv.Key], kv.Value)
 		}
-		inputFile.Close()
 	}
 
 	outputName := mergeName(jobName, reduceTaskNumber)
