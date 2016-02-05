@@ -1,9 +1,6 @@
 package mapreduce
 
-import (
-	"fmt"
-	"sync"
-)
+import "fmt"
 
 // schedule starts and waits for all tasks in the given phase (Map or Reduce).
 func (mr *Master) schedule(phase jobPhase) {
@@ -26,8 +23,8 @@ func (mr *Master) schedule(phase jobPhase) {
 	// multiple tasks.
 	//
 	successes := 0
+	done := make(chan int, ntasks + 1)
 	taskChan := make(chan int)
-	lock := &sync.Mutex{}
 
 	go func() {
 		for i := 0; i < ntasks; i++ {
@@ -35,22 +32,25 @@ func (mr *Master) schedule(phase jobPhase) {
 		}
 	}()
 
+	go func() {
+		for successes < ntasks {
+			successes += <- done
+		}
+		close(taskChan)
+	}()
+
 	for next := range taskChan {
+		debug("next: %v\n", next)
 		freeWorker := <-mr.registerChannel
-		go func(taskNum int) {
+		go func(worker string, taskNum int) {
 			task := DoTaskArgs{mr.jobName, mr.files[taskNum], phase, taskNum, nios}
-			if call(freeWorker, "Worker.DoTask", &task, new(struct{})) {
-				lock.Lock()
-				successes++
-				if successes == ntasks {
-					close(taskChan)
-				}
-				lock.Unlock()
+			if call(worker, "Worker.DoTask", &task, new(struct{})) {
+				done <- 1
 			} else {
 				taskChan <- taskNum
 			}
-			mr.registerChannel <- freeWorker
-		}(next)
+			mr.registerChannel <- worker
+		}(freeWorker, next)
 	}
 
 	fmt.Printf("Schedule: %v phase done\n", phase)
