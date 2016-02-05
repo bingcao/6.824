@@ -46,10 +46,10 @@ func (mr *Master) schedule(phase jobPhase) {
 			task := DoTaskArgs{mr.jobName, mr.files[taskNum], phase, taskNum, nios}
 			if call(worker, "Worker.DoTask", &task, new(struct{})) {
 				done <- 1
+				mr.registerChannel <- worker
 			} else {
 				taskChan <- taskNum
 			}
-			mr.registerChannel <- worker
 		}(freeWorker, next)
 	}
 

@@ -38,13 +38,6 @@ func doReduce(
 	// }
 	// file.Close()
 
-	outputName := mergeName(jobName, reduceTaskNumber)
-	outputFile, err := os.Open(outputName)
-	if os.IsNotExist(err) {
-		outputFile, _ = os.Create(outputName)
-	}
-	output_enc := json.NewEncoder(outputFile)
-	defer outputFile.Close()
 	output_map := make(map[string][]string)
 
 	for i := 0; i < nMap; i++ {
@@ -58,10 +51,20 @@ func doReduce(
 		}
 		inputFile.Close()
 	}
+
+	outputName := mergeName(jobName, reduceTaskNumber)
+	outputFile, err := os.Open(outputName)
+	if os.IsNotExist(err) {
+		outputFile, _ = os.Create(outputName)
+	}
+	output_enc := json.NewEncoder(outputFile)
+
 	for key, values := range output_map {
 		err = output_enc.Encode(KeyValue{key, reduceF(key, values)})
 		if err != nil {
 			fmt.Println("reducing encoding err:", err)
 		}
 	}
+
+	outputFile.Close()
 }
