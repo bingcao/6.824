@@ -23,7 +23,7 @@ func (mr *Master) schedule(phase jobPhase) {
 	// multiple tasks.
 	//
 	successes := 0
-	done := make(chan int, ntasks + 1)
+	done := make(chan int, ntasks+1)
 	taskChan := make(chan int)
 
 	go func() {
@@ -34,7 +34,7 @@ func (mr *Master) schedule(phase jobPhase) {
 
 	go func() {
 		for successes < ntasks {
-			successes += <- done
+			successes += <-done
 		}
 		close(taskChan)
 	}()
@@ -43,7 +43,11 @@ func (mr *Master) schedule(phase jobPhase) {
 		debug("next: %v\n", next)
 		freeWorker := <-mr.registerChannel
 		go func(worker string, taskNum int) {
-			task := DoTaskArgs{mr.jobName, mr.files[taskNum], phase, taskNum, nios}
+			file := ""
+			if phase == mapPhase {
+				file = mr.files[taskNum]
+			}
+			task := DoTaskArgs{mr.jobName, file, phase, taskNum, nios}
 			if call(worker, "Worker.DoTask", &task, new(struct{})) {
 				done <- 1
 				mr.registerChannel <- worker
