@@ -76,6 +76,7 @@ type Raft struct {
 	electionTimer *time.Timer
 	state         State
 	applyCh       chan ApplyMsg
+	goApply       chan bool
 	quitElection  chan bool
 }
 
@@ -143,18 +144,15 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	reply.Term = rf.currentTerm
 
 	if rf.state == Leader && rf.currentTerm >= args.Term {
 		return
-	} else if rf.state == Leader {
-		// TODO: ugly, but avoids some error messages
-		debug("leader %d resetting to follower\n", rf.me)
-		rf.state = Follower
 	}
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	newTerm := rf.currentTerm
 
 	if args.Term > rf.currentTerm {
@@ -169,11 +167,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		//debug("server %d rejected server %d, and vote granted set to %d\n", rf.me, args.CandidateId, reply.VoteGranted)
 	} else {
-		lastLogTerm := 1
+		lastLogTerm := 0
 		if len(rf.log) > 0 {
 			lastLogTerm = rf.log[len(rf.log)-1].Term
 		}
-		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= rf.lastApplied) {
+		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= len(rf.log)-1) {
 			rf.resetTimer()
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
@@ -220,23 +218,12 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-func (rf *Raft) applyMessages(leaderCommit int) {
-	if leaderCommit > len(rf.log)-1 {
-		leaderCommit = len(rf.log) - 1
-	}
-	if leaderCommit > rf.commitIndex {
-		rf.commitIndex = func() int {
-			if leaderCommit < len(rf.log)-1 {
-				return leaderCommit
-			}
-			return len(rf.log) - 1
-		}()
-	}
+func (rf *Raft) applyMessages() {
 	for rf.commitIndex > rf.lastApplied {
 		// TODO: apply log[lastApplied] to state machine
 		debug("server %d applying log entry %d\n", rf.me, rf.lastApplied+1)
 		rf.lastApplied++
-		applyMsg := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied].Command}
+		applyMsg := ApplyMsg{Index: rf.lastApplied + 1, Command: rf.log[rf.lastApplied].Command}
 		rf.applyCh <- applyMsg
 	}
 }
@@ -265,14 +252,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}()
 		rf.state = Follower
 	}
-	/*	if len(args.Entries) == 0 {
-		// TODO: add comment explaining this lmao; also might need to lock
-		// Heartbeats also used to maintain commits
-		if args.PrevLogIndex < len(rf.log) && args.PrevLogIndex != -1 && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
-			rf.applyMessages(args.LeaderCommit)
-		}
-		return
-	}*/
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -306,7 +285,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		if len(args.Entries) > 0 {
 			debug("UPDATE: server %d's new log: %+v\n", rf.me, rf.log)
 		}
-		rf.applyMessages(args.LeaderCommit)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			rf.goApply <- true
+		}
 	}
 }
 
@@ -374,13 +356,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]Log, 0)
-	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.commitIndex = -1
+	rf.lastApplied = -1
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.matchLocks = make([]sync.Mutex, len(peers))
 	rf.state = Follower
 	rf.applyCh = applyCh
+	rf.goApply = make(chan bool)
 	rf.quitElection = make(chan bool)
 
 	// initialize from state persisted before a crash
@@ -390,9 +373,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(time.Millisecond * time.Duration(rand.Intn(400)+100))
 
 	go func() {
+		// election timer loop
 		for _ = range rf.electionTimer.C {
 			debug("server %d election timer timed out!\n", rf.me)
 			go rf.newElection()
+		}
+	}()
+
+	go func() {
+		for _ = range rf.goApply {
+			rf.applyMessages()
 		}
 	}()
 
@@ -412,21 +402,28 @@ func (rf *Raft) handleMessage(m ApplyMsg) {
 
 func (rf *Raft) newElection() {
 	//debug("server %d starting an election!\n", rf.me)
+
+	rf.mu.Lock()
 	rf.resetTimer()
 	rf.currentTerm += 1
+	currentTerm := rf.currentTerm
 	rf.votedFor = rf.me
 	rf.state = Candidate
-	voteArgs := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: len(rf.log)}
+	voteArgs := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: len(rf.log) - 1}
+
 	if len(rf.log) == 0 {
-		voteArgs.LastLogTerm = 1
+		voteArgs.LastLogTerm = 0
 	} else {
 		voteArgs.LastLogTerm = rf.log[len(rf.log)-1].Term
 	}
+	rf.mu.Unlock()
+
 	var reply RequestVoteReply
 	votes := make(chan bool)
 	voteCount := 0
 	yeses := 0
 	electionDone := false
+	var electionMu sync.Mutex
 
 	var wg sync.WaitGroup
 
@@ -439,16 +436,20 @@ func (rf *Raft) newElection() {
 			defer wg.Done()
 			if rf.sendRequestVote(follower, voteArgs, &reply) {
 				//debug("server %d got reply from server %d that's: %+v\n", rf.me, follower, reply)
+				electionMu.Lock()
 				if electionDone {
 					return
 				}
+				electionMu.Unlock()
 				if reply.VoteGranted {
 					//debug("server %d accepting a YES vote from server %d\n", rf.me, follower)
 					votes <- true
 				} else {
 					//debug("server %d getting a NO vote from server %d\n", rf.me, follower)
-					if reply.Term > rf.currentTerm {
+					if reply.Term > currentTerm {
+						rf.mu.Lock()
 						rf.updateTerm(reply.Term)
+						rf.mu.Unlock()
 						rf.quitElection <- true
 					}
 					votes <- false
@@ -470,7 +471,9 @@ func (rf *Raft) newElection() {
 		select {
 		case <-rf.quitElection:
 			debug("server %d exiting election because term is outdated\n", rf.me)
+			electionMu.Lock()
 			electionDone = true
+			electionMu.Unlock()
 
 		case vote := <-votes:
 			//debug("server %d got vote %d\n", rf.me, vote)
@@ -478,20 +481,26 @@ func (rf *Raft) newElection() {
 			if vote {
 				yeses++
 			}
+			rf.mu.Lock()
 			if yeses == (len(rf.peers)-1)/2 && rf.votedFor == rf.me { // TODO: i feel like the second check is kinda hacky
 				debug("server %d becoming leader with %d votes\n", rf.me, yeses)
 				rf.state = Leader
 				for i := 0; i < len(rf.peers); i++ {
 					rf.nextIndex[i] = len(rf.log)
-					rf.matchIndex[i] = 0
+					rf.matchIndex[i] = -1
 				}
 				rf.electionTimer.Stop()
 				go rf.leader()
+				electionMu.Lock()
 				electionDone = true
-			} else if voteCount == len(rf.peers)-1 {
+				electionMu.Unlock()
+			} else if voteCount == len(rf.peers)-1 || rf.votedFor != rf.me {
 				debug("server %d exiting election as follower...\n", rf.me)
+				electionMu.Lock()
 				electionDone = true
+				electionMu.Unlock()
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -503,41 +512,42 @@ func (rf *Raft) leader() {
 			for rf.state == Leader {
 				<-time.After(50 * time.Millisecond)
 
+				index := rf.nextIndex[i]
 				rf.mu.Lock()
-				log_length := len(rf.log)
+				newEntries := AppendEntriesArgs{rf.currentTerm, rf.me, index - 1, 0, make([]Log, 0), rf.commitIndex}
+				if len(rf.log) >= index {
+					newEntries.Entries = rf.log[index:]
+				}
+				if index-1 >= 0 {
+					newEntries.PrevLogTerm = rf.log[index-1].Term
+				}
 				rf.mu.Unlock()
 
-				index := rf.nextIndex[i]
-				if log_length > 0 && log_length > index {
-					newEntries := AppendEntriesArgs{rf.currentTerm, rf.me, index - 1, rf.log[log_length-1].Term, rf.log[index:], rf.commitIndex}
-					if index > 0 {
-						newEntries.PrevLogTerm = rf.log[index-1].Term
-					}
-					var reply AppendEntriesReply
-					if !rf.sendAppendEntries(i, newEntries, &reply) {
-						debug("send append entries failed for server %d from leader %d\n", i, rf.me)
-						// TODO: I think you shouldn't do anything in this case, need to check
-					} else {
-						debug("reply: %+v\n", reply)
-						if reply.Term > rf.currentTerm {
-							debug("leader %d's term %d behind server %d's term %d\n", rf.me, rf.currentTerm, i, reply.Term)
-							rf.updateTerm(reply.Term)
-							rf.resetTimer()
-							// TODO: this part seems sketchy. may need to halt more of the leader processes
-						} else if reply.Success {
-							rf.nextIndex[i] = log_length
-							rf.matchLocks[i].Lock()
-							rf.matchIndex[i] = log_length - 1
-							rf.matchLocks[i].Unlock()
+				var reply AppendEntriesReply
+				if !rf.sendAppendEntries(i, newEntries, &reply) {
+					debug("send append entries failed for server %d from leader %d\n", i, rf.me)
+					// TODO: I think you shouldn't do anything in this case, need to check
+				} else {
+					//debug("reply: %+v\n", reply)
+					if reply.Term > rf.currentTerm {
+						if len(newEntries.Entries) == 0 {
+							debug("from heartbeat: ")
 						} else {
-							if index > 0 {
-								rf.nextIndex[i]--
-							}
+							debug("from append entries reply: ")
+						}
+						rf.updateTerm(reply.Term)
+						rf.resetTimer()
+						// TODO: this part seems sketchy. may need to halt more of the leader processes
+					} else if reply.Success {
+						rf.nextIndex[i] = rf.nextIndex[i] + len(newEntries.Entries)
+						rf.matchLocks[i].Lock()
+						rf.matchIndex[i] = rf.matchIndex[i] + len(newEntries.Entries)
+						rf.matchLocks[i].Unlock()
+					} else {
+						if index > 0 {
+							rf.nextIndex[i]--
 						}
 					}
-				} else {
-					// No new updates, so send heartbeat instead
-					rf.heartbeat(i)
 				}
 			}
 		}(i)
@@ -550,7 +560,6 @@ func (rf *Raft) leader() {
 			currentTerm := rf.currentTerm
 			rf.mu.Unlock()
 
-			//debug("updating commits\n")
 			newCommit := rf.commitIndex
 			for i := rf.commitIndex + 1; i < log_length; i++ {
 				count := 0
@@ -576,8 +585,9 @@ func (rf *Raft) leader() {
 			}
 			if newCommit != rf.commitIndex {
 				rf.commitIndex = newCommit
+				rf.goApply <- true
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(25 * time.Millisecond)
 		}
 	}()
 }
