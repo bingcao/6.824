@@ -12,14 +12,15 @@ import "testing"
 import "fmt"
 import "time"
 
-//import "math/rand"
-//import "sync/atomic"
+import "math/rand"
+
+import "sync/atomic"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-/*func TestInitialElection(t *testing.T) {
+func TestInitialElection(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -38,7 +39,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 	}
 
 	fmt.Printf("  ... Passed\n")
-}*/
+}
 
 func TestReElection(t *testing.T) {
 	servers := 3
@@ -48,45 +49,45 @@ func TestReElection(t *testing.T) {
 	fmt.Printf("Test: election after network failure ...\n")
 
 	leader1 := cfg.checkOneLeader()
-	debug("Passed first check\n")
+	//debug("Passed first check\n")
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
-	debug("Passed second check after leader %d disconnected\n", leader1)
+	//debug("Passed second check after leader %d disconnected\n", leader1)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
-	debug("Reconnecting server %d\n", leader1)
+	//debug("Reconnecting server %d\n", leader1)
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
-	debug("Passed third check after server %d reconnected with new leader %d\n", leader1, leader2)
+	//debug("Passed third check after server %d reconnected with new leader %d\n", leader1, leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	debug("Disconnected servers %d and %d\n", leader2, (leader2+1)%servers)
-	debug("Gonna take a nap...\n")
+	//debug("Disconnected servers %d and %d\n", leader2, (leader2+1)%servers)
+	//debug("Gonna take a nap...\n")
 	time.Sleep(2 * RaftElectionTimeout)
-	debug("Back!\n")
+	//debug("Back!\n")
 	cfg.checkNoLeader()
-	debug("Passed no leader fourth check\n")
+	//debug("Passed no leader fourth check\n")
 
 	// if a quorum arises, it should elect a leader.
-	debug("Reconnecting server %d\n", (leader2+1)%servers)
+	//debug("Reconnecting server %d\n", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
-	debug("Reconnecting server %d\n", leader2)
+	//debug("Reconnecting server %d\n", leader2)
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 
 	fmt.Printf("  ... Passed\n")
 }
 
-/*func TestBasicAgree(t *testing.T) {
+func TestBasicAgree(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -99,7 +100,6 @@ func TestReElection(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
 		xindex := cfg.one(index*100, servers)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
@@ -117,12 +117,12 @@ func TestFailAgree(t *testing.T) {
 	fmt.Printf("Test: agreement despite follower failure ...\n")
 
 	cfg.one(101, servers)
-	fmt.Printf("Passed first agreement\n")
+	//fmt.Printf("Passed first agreement\n")
 
 	// follower network failure
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	fmt.Printf("Disconnected server %d\n", (leader+1)%servers)
+	//fmt.Printf("Disconnected server %d\n", (leader+1)%servers)
 
 	// agree despite one failed server?
 	cfg.one(102, servers-1)
@@ -130,15 +130,17 @@ func TestFailAgree(t *testing.T) {
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(104, servers-1)
 	cfg.one(105, servers-1)
-	fmt.Printf("Tests passed after disconnection\n")
+	//fmt.Printf("Tests passed after disconnection\n")
 
 	// failed server re-connected
 	cfg.connect((leader + 1) % servers)
-	fmt.Printf("Reconnected server %d\n", (leader+1)%servers)
+	//fmt.Printf("Reconnected server %d\n", (leader+1)%servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
+	//fmt.Printf("Confirmed 106\n")
 	time.Sleep(RaftElectionTimeout)
+	//fmt.Printf("Coming back with the last one\n")
 	cfg.one(107, servers)
 
 	fmt.Printf("  ... Passed\n")
@@ -152,14 +154,14 @@ func TestFailNoAgree(t *testing.T) {
 	fmt.Printf("Test: no agreement if too many followers fail ...\n")
 
 	cfg.one(10, servers)
-	fmt.Printf("first check\n")
+	//fmt.Printf("first check\n")
 
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
-	fmt.Printf("disconnected servers %d, %d, and %d\n", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
+	//fmt.Printf("disconnected servers %d, %d, and %d\n", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
@@ -168,7 +170,7 @@ func TestFailNoAgree(t *testing.T) {
 	if index != 2 {
 		t.Fatalf("expected index 2, got %v", index)
 	}
-	fmt.Printf("leader still accepted stuff\n")
+	//fmt.Printf("leader still accepted stuff\n")
 
 	time.Sleep(2 * RaftElectionTimeout)
 
@@ -181,7 +183,7 @@ func TestFailNoAgree(t *testing.T) {
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
 	cfg.connect((leader + 3) % servers)
-	fmt.Printf("reconnected all servers\n")
+	//fmt.Printf("reconnected all servers\n")
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
@@ -217,14 +219,12 @@ func TestConcurrentStarts(t *testing.T) {
 			}
 		}(ii)
 	}
-	fmt.Printf("concurrently sent a bunch of starts\n")
 
 	cmds := []int{}
-	for index := 0; index < iters; index++ {
+	for index := 1; index <= iters; index++ {
 		cmd := cfg.wait(index, servers)
 		if ix, ok := cmd.(int); ok {
 			cmds = append(cmds, ix)
-			fmt.Printf("cmd %d found!", ix)
 		} else {
 			t.Fatalf("value %v is not an int", cmd)
 		}
@@ -245,7 +245,7 @@ func TestConcurrentStarts(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-/*func TestRejoin(t *testing.T) {
+func TestRejoin(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -281,9 +281,9 @@ func TestConcurrentStarts(t *testing.T) {
 	cfg.one(105, servers)
 
 	fmt.Printf("  ... Passed\n")
-}*/
+}
 
-/*func TestBackup(t *testing.T) {
+func TestBackup(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -304,6 +304,7 @@ func TestConcurrentStarts(t *testing.T) {
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
+	//fmt.Printf("moving around partitions now\n")
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
@@ -332,6 +333,7 @@ func TestConcurrentStarts(t *testing.T) {
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
+	//fmt.Printf("SECOND SLEEP DONE\n")
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
@@ -340,11 +342,13 @@ func TestConcurrentStarts(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
+	//fmt.Printf("RECONNECTED ORIGINAL GROUP (%d, %d) + LONE OTHER WHO IS SERVER %d\n", (leader1)%servers, (leader1+1)%servers, other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
+	//fmt.Printf("NEW GROUP SUCCEEDED\n")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
@@ -623,7 +627,7 @@ func TestUnreliableAgree(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestFigure8Unreliable(t *testing.T) {
+/*func TestFigure8Unreliable(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
 	defer cfg.cleanup()
@@ -631,9 +635,11 @@ func TestFigure8Unreliable(t *testing.T) {
 	fmt.Printf("Test: Figure 8 (unreliable) ...\n")
 
 	cfg.one(rand.Int()%10000, 1)
+	fmt.Printf("first one done at least\n")
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		//fmt.Printf("ITER %d\n", iters)
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -654,6 +660,7 @@ func TestFigure8Unreliable(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			fmt.Printf("DISCONNECTING leader %d\n", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -661,6 +668,7 @@ func TestFigure8Unreliable(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
+				fmt.Printf("RECONNECTING server %d\n", s)
 				cfg.connect(s)
 				nup += 1
 			}
@@ -674,9 +682,10 @@ func TestFigure8Unreliable(t *testing.T) {
 	}
 
 	cfg.one(rand.Int()%10000, servers)
+	fmt.Printf("last one done\n")
 
 	fmt.Printf("  ... Passed\n")
-}
+}*/
 
 func internalChurn(t *testing.T, unreliable bool) {
 
@@ -829,4 +838,4 @@ func TestReliableChurn(t *testing.T) {
 
 func TestUnreliableChurn(t *testing.T) {
 	internalChurn(t, true)
-}*/
+}
