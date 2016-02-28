@@ -163,7 +163,7 @@ func (cfg *config) start1(i int) {
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
-				//fmt.Printf("added msg %+v to log at %d, %d\n", m, i, m.Index)
+				//fmt.Printf("added cmd %d to log at %d, %d\n", m.Command, i, m.Index)
 			} else {
 				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)
 			}

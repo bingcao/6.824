@@ -27,6 +27,7 @@ import (
 	"time"
 )
 
+// asdfasdf
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -65,19 +66,19 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	CurrentTerm   int
-	VotedFor      int
-	Log           []Log
-	commitIndex   int
-	lastApplied   int
-	nextIndex     []int
-	matchIndex    []int
-	electionTimer *time.Timer
-	state         State
-	applyCh       chan ApplyMsg
-	goApply       chan bool
-	quitElection  chan bool
-	killCh        chan bool
+	CurrentTerm    int
+	VotedFor       int
+	Log            []Log
+	commitIndex    int
+	lastApplied    int
+	nextIndex      []int
+	matchIndex     []int
+	electionTimer  *time.Timer
+	state          State
+	applyCh        chan ApplyMsg
+	goApply        chan bool
+	quitElectionCh chan bool
+	killCh         chan bool
 }
 
 // return currentTerm and whether this server
@@ -122,7 +123,7 @@ func (rf *Raft) resetTimer() {
 	if rf.state == Leader {
 		debug("WHATWHATWHAT: leader %d shouldn't be here\n", rf.me)
 	}
-	newTime := rand.Intn(500) + 100
+	newTime := rand.Intn(250) + 250
 	rf.electionTimer.Reset(time.Millisecond * time.Duration(newTime))
 }
 
@@ -164,6 +165,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.CurrentTerm {
 		debug("updating server %d's term from %d to %d\n", rf.me, rf.CurrentTerm, args.Term)
 		newTerm = args.Term
+		if rf.state == Candidate {
+			go rf.quitElection(rf.CurrentTerm)
+		}
 		rf.state = Follower
 		rf.VotedFor = -1
 		rf.resetTimer()
@@ -262,6 +266,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.CurrentTerm
+
+	if len(args.Entries) > 0 {
+		debug("REQUEST: server %d with state %d, log of length %d, term %d, and commit index %d received append request from leader %d with Term %d, CommitIndex %d, PrevLogIndex %d, and PrevLogTerm %d\n", rf.me, rf.state, len(rf.Log), rf.CurrentTerm, rf.commitIndex, args.LeaderId, args.Term, args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
+	}
 	if rf.state != Leader {
 		rf.resetTimer()
 	}
@@ -276,20 +284,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.updateTerm(args.Term)
 	}
 
-	if len(args.Entries) > 0 {
-		debug("REQUEST: server %d with log of length %d, term %d, and commit index %d received append request from leader %d with Term %d, CommitIndex %d, PrevLogIndex %d, and PrevLogTerm %d\n", rf.me, len(rf.Log), rf.CurrentTerm, rf.commitIndex, args.LeaderId, args.Term, args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
-		//debug("REQUEST: server %d with log %+v, term %d, and commit index %d received the following request:\n%+v\n", rf.me, rf.Log, rf.CurrentTerm, rf.commitIndex, args)
-	}
-
 	if rf.state != Leader {
 		rf.resetTimer()
 	}
 
 	if rf.state == Candidate && rf.CurrentTerm <= args.Term {
-		// TODO: stop waiting for votes
-		go func() {
-			rf.quitElection <- true
-		}()
+		go rf.quitElection(rf.CurrentTerm)
 		rf.state = Follower
 	}
 
@@ -367,7 +367,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.CurrentTerm
 	rf.Log = append(rf.Log, Log{term, index, command})
 	rf.persist()
-	//debug("NOTICE: appended new log entry to leader!\n")
+	debug("NOTICE: appended new log entry to leader %d!\n", rf.me)
+	<-time.After(10 * time.Millisecond)
 	return index + 1, term, true
 }
 
@@ -405,14 +406,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.applyCh = applyCh
 	rf.goApply = make(chan bool)
-	rf.quitElection = make(chan bool)
+	rf.quitElectionCh = make(chan bool)
 	rf.killCh = make(chan bool)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	rand.Seed(time.Now().Unix())
-	rf.electionTimer = time.NewTimer(time.Millisecond * time.Duration(rand.Intn(500)+100))
+	rf.electionTimer = time.NewTimer(time.Millisecond * time.Duration(rand.Intn(250)+250))
 
 	go func() {
 		// election timer loop
@@ -442,8 +443,20 @@ func (rf *Raft) handleMessage(m ApplyMsg) {
 	rf.resetTimer()
 }
 
-func (rf *Raft) newElection() {
+func (rf *Raft) quitElection(curTerm int) {
+	for {
+		select {
+		case rf.quitElectionCh <- true:
+			return
+		default:
+			if rf.CurrentTerm > curTerm || rf.state != Candidate {
+				return
+			}
+		}
+	}
+}
 
+func (rf *Raft) newElection() {
 	rf.mu.Lock()
 	rf.resetTimer()
 	rf.CurrentTerm += 1
@@ -470,30 +483,33 @@ func (rf *Raft) newElection() {
 	var wg sync.WaitGroup
 
 	for i := range rf.peers {
-		wg.Add(1)
 		if i == rf.me {
 			continue
 		}
+		wg.Add(1)
 		go func(follower int) {
 			defer wg.Done()
 			var reply RequestVoteReply
 			if rf.sendRequestVote(follower, voteArgs, &reply) {
-				debug("server %d got reply from server %d that's: %+v\n", rf.me, follower, reply)
+				debug("server %d in term %d got reply from server %d that's: %+v\n", rf.me, currentTerm, follower, reply)
 				electionMu.Lock()
 				if electionDone {
 					return
 				}
 				electionMu.Unlock()
 				if reply.VoteGranted {
-					debug("server %d accepting a YES vote from server %d\n", rf.me, follower)
+					debug("server %d in term %d accepting a YES vote from server %d\n", rf.me, currentTerm, follower)
 					votes <- true
 				} else {
-					debug("server %d getting a NO vote from server %d\n", rf.me, follower)
+					debug("server %d in term %d getting a NO vote from server %d\n", rf.me, currentTerm, follower)
 					if reply.Term > currentTerm {
 						rf.mu.Lock()
 						rf.updateTerm(reply.Term)
 						rf.mu.Unlock()
-						rf.quitElection <- true
+						go rf.quitElection(currentTerm)
+						electionMu.Lock()
+						electionDone = true
+						electionMu.Unlock()
 					}
 					votes <- false
 				}
@@ -512,7 +528,7 @@ func (rf *Raft) newElection() {
 			break
 		}
 		select {
-		case <-rf.quitElection:
+		case <-rf.quitElectionCh:
 			debug("server %d exiting election because term is outdated\n", rf.me)
 			electionMu.Lock()
 			electionDone = true
@@ -551,7 +567,7 @@ func (rf *Raft) newElection() {
 func (rf *Raft) leader() {
 	debug("LEADER %d process spawned\n", rf.me)
 	for i := range rf.peers {
-		go func(i int) {
+		go func(follower int) {
 			for {
 
 				rf.mu.Lock()
@@ -560,71 +576,90 @@ func (rf *Raft) leader() {
 
 				if state == Leader {
 
-					rf.mu.Lock()
-					index := rf.nextIndex[i]
-					newEntries := AppendEntriesArgs{rf.CurrentTerm, rf.me, index - 1, 0, make([]Log, 0), rf.commitIndex}
-					if index < 0 {
-						debug("WEIRDWEIRDWIRD: leader %d of term %d has next index %d of server %d, log is %+v\n", rf.me, rf.CurrentTerm, rf.nextIndex[i], i, rf.Log)
-					}
-					if len(rf.Log) >= index {
-						newEntries.Entries = rf.Log[index:]
-					}
-					if index-1 >= 0 {
-						if index-1 >= len(rf.Log) {
-							debug("FAIL: next index %d of server %d weird, my log is %+v\n", index, i, rf.Log)
-						}
-						newEntries.PrevLogTerm = rf.Log[index-1].Term
-					}
-					rf.mu.Unlock()
-
-					var reply AppendEntriesReply
-					if !rf.sendAppendEntries(i, newEntries, &reply) {
-						//debug("send append entries failed for server %d from leader %d\n", i, rf.me)
-						// TODO: I think you shouldn't do anything in this case, need to check
-					} else {
-						/*if len(newEntries.Entries) > 0 {
-							debug("REPLY from server %d: %+v\n", i, reply)
-						}*/
-
+					go func() {
 						rf.mu.Lock()
-						if reply.Term > rf.CurrentTerm {
-							if len(newEntries.Entries) == 0 {
-								debug("from heartbeat: ")
-							} else {
-								debug("from append entries reply: ")
+						index := rf.nextIndex[follower]
+						newEntries := AppendEntriesArgs{rf.CurrentTerm, rf.me, index - 1, 0, make([]Log, 0), rf.commitIndex}
+						if index < 0 {
+							debug("WEIRDWEIRDWIRD: leader %d of term %d has next index %d of server %d, log is %+v\n", rf.me, rf.CurrentTerm, rf.nextIndex[follower], follower, rf.Log)
+						}
+						if len(rf.Log) >= index {
+							newEntries.Entries = rf.Log[index:]
+						}
+						if index-1 >= 0 {
+							if index-1 >= len(rf.Log) {
+								debug("FAIL: next index %d of server %d weird, my log is %+v\n", index, follower, rf.Log)
 							}
-							rf.updateTerm(reply.Term)
-							rf.resetTimer()
-							// TODO: this part seems sketchy. may need to halt more of the leader processes
-						} else if reply.Success {
-							rf.nextIndex[i] = min(rf.nextIndex[i]+len(newEntries.Entries), len(rf.Log))
-							rf.matchIndex[i] = rf.nextIndex[i] - 1
-							if len(newEntries.Entries) > 0 {
-								debug("old nextIndex for server %d was %d, now %d\n", i, rf.nextIndex[i]-len(newEntries.Entries), rf.nextIndex[i])
-								debug("old matchIndex for server %d was %d, now %d\n", i, rf.matchIndex[i]-len(newEntries.Entries), rf.matchIndex[i])
-							}
-						} else {
-							if index > 0 {
-								newIndex := max(rf.nextIndex[i]-1, 0)
-								for ; newIndex > 0; newIndex-- {
-									if rf.Log[newIndex].Term == reply.ConflictTerm {
-										break
-									}
-								}
-								if reply.FirstConflictIndex < 0 && newIndex < 0 {
-									debug("WHATWHATWHAT: leader %d got double -1s for server %d, previously %d\n", rf.me, i, rf.nextIndex[i])
-								}
-								rf.nextIndex[i] = min(reply.FirstConflictIndex, newIndex)
-								rf.matchIndex[i] = rf.nextIndex[i] - 1
-							}
+							newEntries.PrevLogTerm = rf.Log[index-1].Term
 						}
 						rf.mu.Unlock()
 
-					}
+						var reply AppendEntriesReply
+						replyCh := make(chan bool)
+						timedOut := make(chan bool)
+						go func() {
+							ok := rf.sendAppendEntries(follower, newEntries, &reply)
+							select {
+							case <-timedOut:
+								//fmt.Println("timedOut")
+								return
+							case replyCh <- ok:
+								return
+							}
+						}()
+
+						timeout := 15 * time.Millisecond
+
+						select {
+						case <-replyCh:
+							/*if len(newEntries.Entries) > 0 {
+								debug("REPLY from server %d: %+v\n", follower, reply)
+							}*/
+
+							rf.mu.Lock()
+							if reply.Term > rf.CurrentTerm {
+								if len(newEntries.Entries) == 0 {
+									debug("from heartbeat: ")
+								} else {
+									debug("from append entries reply: ")
+								}
+								rf.updateTerm(reply.Term)
+								rf.resetTimer()
+								// TODO: this part seems sketchy. may need to halt more of the leader processes
+							} else if reply.Success {
+								rf.nextIndex[follower] = min(rf.nextIndex[follower]+len(newEntries.Entries), len(rf.Log))
+								rf.matchIndex[follower] = rf.nextIndex[follower] - 1
+								if len(newEntries.Entries) > 0 {
+									debug("old nextIndex for server %d was %d, now %d\n", follower, rf.nextIndex[follower]-len(newEntries.Entries), rf.nextIndex[follower])
+									debug("old matchIndex for server %d was %d, now %d\n", follower, rf.matchIndex[follower]-len(newEntries.Entries), rf.matchIndex[follower])
+								}
+							} else {
+								if index > 0 {
+									newIndex := max(rf.nextIndex[follower]-1, 0)
+									for ; newIndex > 0; newIndex-- {
+										if rf.Log[newIndex].Term == reply.ConflictTerm {
+											break
+										}
+									}
+									if reply.FirstConflictIndex < 0 && newIndex < 0 {
+										debug("WHATWHATWHAT: leader %d got double -1s for server %d, previously %d\n", rf.me, follower, rf.nextIndex[follower])
+									}
+									rf.nextIndex[follower] = min(reply.FirstConflictIndex, newIndex)
+									rf.matchIndex[follower] = rf.nextIndex[follower] - 1
+								}
+							}
+							rf.mu.Unlock()
+
+						case <-time.After(timeout):
+							// Timeout; disregard reply
+							timedOut <- true
+						}
+
+					}()
 				} else {
 					break
 				}
-				<-time.After(75 * time.Millisecond)
+				<-time.After(50 * time.Millisecond)
 			}
 		}(i)
 	}
