@@ -380,6 +380,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.electionTimer.Stop()
 	rf.killCh <- true
 }
 
@@ -407,7 +408,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.goApply = make(chan bool)
 	rf.quitElectionCh = make(chan bool)
-	rf.killCh = make(chan bool)
+	rf.killCh = make(chan bool, 2)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -499,6 +500,13 @@ func (rf *Raft) newElection() {
 				electionMu.Unlock()
 				if reply.VoteGranted {
 					debug("server %d in term %d accepting a YES vote from server %d\n", rf.me, currentTerm, follower)
+					select {
+					case votes <- true:
+						return
+					case <-rf.killCh:
+						rf.killCh <- true
+						return
+					}
 					votes <- true
 				} else {
 					debug("server %d in term %d getting a NO vote from server %d\n", rf.me, currentTerm, follower)
@@ -511,7 +519,13 @@ func (rf *Raft) newElection() {
 						electionDone = true
 						electionMu.Unlock()
 					}
-					votes <- false
+					select {
+					case votes <- false:
+						return
+					case <-rf.killCh:
+						rf.killCh <- true
+						return
+					}
 				}
 			}
 		}(i)
@@ -565,7 +579,6 @@ func (rf *Raft) newElection() {
 }
 
 func (rf *Raft) leader() {
-	debug("LEADER %d process spawned\n", rf.me)
 	for i := range rf.peers {
 		go func(follower int) {
 			for {
@@ -601,9 +614,11 @@ func (rf *Raft) leader() {
 							ok := rf.sendAppendEntries(follower, newEntries, &reply)
 							select {
 							case <-timedOut:
-								//fmt.Println("timedOut")
 								return
 							case replyCh <- ok:
+								return
+							case <-rf.killCh:
+								rf.killCh <- true
 								return
 							}
 						}()
@@ -653,13 +668,21 @@ func (rf *Raft) leader() {
 						case <-time.After(timeout):
 							// Timeout; disregard reply
 							timedOut <- true
+						case <-rf.killCh:
+							rf.killCh <- true
+							return
 						}
 
 					}()
 				} else {
 					break
 				}
-				<-time.After(50 * time.Millisecond)
+				select {
+				case <-rf.killCh:
+					rf.killCh <- true
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
 		}(i)
 	}
