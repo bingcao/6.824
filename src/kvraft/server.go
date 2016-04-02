@@ -1,12 +1,13 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
-	//"time"
+	//	"time"
 )
 
 const Debug = 0
@@ -41,12 +42,19 @@ type RaftKV struct {
 	applyCh chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
+	snapmu       sync.Mutex
 
 	// Your definitions here.
-	kvs       map[string]string
-	ids       map[int64]bool
 	commChans map[int][]chan ConfirmMsg
+	state     State
 	idMap     map[int64][]chan bool
+}
+
+type State struct {
+	Ids               map[int64]bool
+	Kvs               map[string]string
+	LastIncludedIndex int
+	LastIncludedTerm  int
 }
 
 func (kv *RaftKV) setIdMap(id int64) chan bool {
@@ -131,6 +139,35 @@ func (kv *RaftKV) Kill() {
 	// Your code here, if desired.
 }
 
+func (kv *RaftKV) ReadState(persister *raft.Persister) {
+	var newState State
+	kv.snapmu.Lock()
+	r := bytes.NewBuffer(persister.ReadSnapshot())
+	kv.snapmu.Unlock()
+	if r.Len() == 0 {
+		newState.Ids = make(map[int64]bool)
+		newState.Kvs = make(map[string]string)
+		newState.LastIncludedTerm = 0
+		newState.LastIncludedIndex = 0
+	} else {
+		d := gob.NewDecoder(r)
+		d.Decode(&newState)
+	}
+	kv.mu.Lock()
+	kv.state = newState
+	kv.mu.Unlock()
+}
+
+func (kv *RaftKV) SaveState(persister *raft.Persister) {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(kv.state)
+	data := w.Bytes()
+	kv.snapmu.Lock()
+	persister.SaveSnapshot(data)
+	kv.snapmu.Unlock()
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -155,15 +192,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.kvs = make(map[string]string)
-	kv.ids = make(map[int64]bool)
-	kv.commChans = make(map[int][]chan ConfirmMsg)
 	kv.idMap = make(map[int64][]chan bool)
+	kv.commChans = make(map[int][]chan ConfirmMsg)
+	kv.ReadState(persister)
+	DPrintf("STARTING KV SERVER %d\n", me)
+	kv.rf.Snapshot(kv.state.LastIncludedIndex, kv.state.LastIncludedTerm)
 
 	go func() {
 		for m := range kv.applyCh {
 			if m.UseSnapshot {
-				// ignoring for now
+				kv.ReadState(persister)
 			} else {
 				index := m.Index
 				DPrintf("KVRAFT SERVER %d GOT OP %+v\n", kv.me, m.Command)
@@ -171,43 +209,67 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				var err Err = OK
 				kv.mu.Lock()
 				if m.Command.(Op).Operation == GET {
-					DPrintf("SERVER %d KV IS %+v\n", kv.me, kv.kvs)
-					if value, found := kv.kvs[m.Command.(Op).Key]; found {
+					DPrintf("SERVER %d KV IS %+v\n", kv.me, kv.state.Kvs)
+					if value, found := kv.state.Kvs[m.Command.(Op).Key]; found {
 						sendValue = value
 					} else {
 						err = ErrNoKey
 					}
-				} else if ok, _ := kv.ids[m.Command.(Op).Id]; !ok {
-					kv.ids[m.Command.(Op).Id] = true
+				} else if ok, _ := kv.state.Ids[m.Command.(Op).Id]; !ok {
+					kv.state.Ids[m.Command.(Op).Id] = true
 					if m.Command.(Op).Operation == PUT {
-						kv.kvs[m.Command.(Op).Key] = m.Command.(Op).Value
+						kv.state.Kvs[m.Command.(Op).Key] = m.Command.(Op).Value
 					} else if m.Command.(Op).Operation == APPEND {
-						kv.ids[m.Command.(Op).Id] = true
-						kv.kvs[m.Command.(Op).Key] += m.Command.(Op).Value
+						kv.state.Ids[m.Command.(Op).Id] = true
+						kv.state.Kvs[m.Command.(Op).Key] += m.Command.(Op).Value
 					}
 				}
 				go kv.sendConfirms(index, m.Command.(Op).Id, sendValue, err)
+				kv.state.LastIncludedIndex = m.Index
+				kv.state.LastIncludedTerm = m.Term
+				kv.SaveState(persister)
+				if kv.maxraftstate > 0 {
+					go kv.snapshot(persister)
+				}
 				kv.mu.Unlock()
 			}
 		}
 	}()
 
+	/*go func() {
+		for {
+			kv.mu.Lock()
+			if kv.maxraftstate > 0 && persister.RaftStateSize() >= kv.maxraftstate {
+				kv.SaveState(persister)
+				go kv.rf.Snapshot(kv.state.LastIncludedIndex, kv.state.LastIncludedTerm)
+			}
+			kv.mu.Unlock()
+			<-time.After(500 * time.Millisecond)
+		}
+	}()*/
+
 	return kv
 }
 
+func (kv *RaftKV) snapshot(persister *raft.Persister) {
+	kv.snapmu.Lock()
+	if persister.RaftStateSize() >= kv.maxraftstate {
+		kv.rf.Snapshot(kv.state.LastIncludedIndex, kv.state.LastIncludedTerm)
+	}
+	kv.snapmu.Unlock()
+}
+
 func (kv *RaftKV) sendConfirms(index int, id int64, value string, err Err) {
-	DPrintf("SERVER %d SENDING TO %d CHANNELS: %+v\n", kv.me, len(kv.commChans[index]), ConfirmMsg{id, value, err})
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	DPrintf("CHECKING ALL CHANNELS READY\n")
 	for j := 0; j < len(kv.idMap[id]); j++ {
 		<-kv.idMap[id][j]
 		close(kv.idMap[id][j])
 	}
 	delete(kv.idMap, id)
-	DPrintf("CLEARED CHANNELS\n")
 	for i := 0; i < len(kv.commChans[index]); i++ {
 		kv.commChans[index][i] <- ConfirmMsg{id, value, err}
 		close(kv.commChans[index][i])
 	}
+	delete(kv.commChans, index)
 }
